@@ -1,0 +1,16 @@
+# KETI GPU Plugin Configuration
+# Local development configuration
+
+scheduler:
+  poll_interval: 10
+  fine_grained_allocation: true
+
+gpu:
+  system_reserved_mb: 256
+  allow_simulation: true
+
+logging:
+  level: INFO
+
+hami:
+  enabled: false
