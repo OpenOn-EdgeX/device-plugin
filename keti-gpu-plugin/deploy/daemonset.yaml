@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: keti-gpu-plugin
+  namespace: edge-system
+  labels:
+    app: keti-gpu-plugin
+    component: scheduler
+spec:
+  selector:
+    matchLabels:
+      app: keti-gpu-plugin
+  template:
+    metadata:
+      labels:
+        app: keti-gpu-plugin
+    spec:
+      # Use host network to access EdgeCore MetaServer (127.0.0.1:10550)
+      hostNetwork: true
+      # Only run on edge nodes
+      nodeSelector:
+        node-role.kubernetes.io/edge: ""
+      tolerations:
+        # Tolerate edge node taints
+        - key: "node-role.kubernetes.io/edge"
+          operator: "Exists"
+          effect: "NoSchedule"
+        # Tolerate GPU taints
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      serviceAccountName: keti-gpu-plugin
+      containers:
+        - name: gpu-plugin
+          image: ketidevit2/keti-gpu-plugin:latest
+          imagePullPolicy: Always
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # vGPU 설정
+            - name: KETI_VGPU_UNITS
+              value: "10"
+            - name: KETI_DEFAULT_MEMORY_MB
+              value: "1024"
+            # KETI Allocator 연동 설정
+            - name: KETI_ALLOCATOR_ENABLED
+              value: "true"  # KETI Allocator와 연동
+            - name: KETI_ALLOCATOR_URL
+              value: "http://127.0.0.1:7070"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            # Device Plugin 소켓 디렉토리
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            # GPU 디바이스 접근
+            - name: dev
+              mountPath: /dev
+            # KETI vai_accelerator.so 배포 디렉토리
+            - name: keti-lib
+              mountPath: /var/lib/keti
+          securityContext:
+            privileged: true
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: DirectoryOrCreate
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: keti-lib
+          hostPath:
+            path: /var/lib/keti
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: keti-gpu-plugin
+  namespace: edge-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: keti-gpu-plugin
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: keti-gpu-plugin
+subjects:
+  - kind: ServiceAccount
+    name: keti-gpu-plugin
+    namespace: edge-system
+roleRef:
+  kind: ClusterRole
+  name: keti-gpu-plugin
+  apiGroup: rbac.authorization.k8s.io
