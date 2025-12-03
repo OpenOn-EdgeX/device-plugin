@@ -1,0 +1,241 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: keti-allocator
+  namespace: edge-system
+  labels:
+    app: keti-allocator
+spec:
+  selector:
+    matchLabels:
+      app: keti-allocator
+  template:
+    metadata:
+      labels:
+        app: keti-allocator
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        node-role.kubernetes.io/edge: ""
+      tolerations:
+        - key: "node-role.kubernetes.io/edge"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: allocator
+          image: python:3.11-slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /app
+              pip install requests --quiet
+              cat > /app/allocator.py << 'PYEOF'
+              #!/usr/bin/env python3
+              import json, threading, time, urllib.request, urllib.error, os
+              from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+              STATE_LOCK = threading.Lock()
+              GPUS = {}
+              TENANTS = {}
+              ALLOCATION_LOG = []  # For visualization
+
+              def _json_load(body):
+                  try: return json.loads(body.decode("utf-8"))
+                  except: return {}
+
+              def _post_json(url, payload, timeout=1.0):
+                  data = json.dumps(payload).encode("utf-8")
+                  req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                  with urllib.request.urlopen(req, timeout=timeout) as resp:
+                      try: return json.loads(resp.read().decode("utf-8")), resp.status
+                      except: return {}, resp.status
+
+              def _pct_to_count(gpu_id, pct):
+                  total = GPUS[gpu_id]["total_sms"]
+                  return max(1, min(total, int(round(total * (pct / 100.0)))))
+
+              def _apply_to_scheduler(gpu_id, tenant, sm_pct=None, sm_count=None, **kwargs):
+                  api = GPUS[gpu_id].get("sched_api")
+                  if not api:
+                      print(f"[allocator] No scheduler registered, skipping apply for {tenant}")
+                      return True, "no_scheduler_skip"
+                  try:
+                      if sm_pct is not None:
+                          _post_json(f"{api}/sm", {"tenant": tenant, "sm_pct": float(sm_pct)})
+                      elif sm_count is not None:
+                          _post_json(f"{api}/sm_count", {"tenant": tenant, "sms": int(sm_count)})
+                      return True, "ok"
+                  except Exception as e:
+                      print(f"[allocator] Scheduler apply failed: {e}")
+                      return True, f"scheduler_error:{e}"
+
+              class AllocatorAPI(BaseHTTPRequestHandler):
+                  protocol_version = "HTTP/1.0"
+                  def log_message(self, format, *args): pass
+
+                  def _read_json(self):
+                      ln = int(self.headers.get("Content-Length", "0") or "0")
+                      return _json_load(self.rfile.read(ln) if ln > 0 else b"")
+
+                  def _j(self, code, obj):
+                      b = json.dumps(obj).encode("utf-8")
+                      self.send_response(code)
+                      self.send_header("Content-Type", "application/json")
+                      self.send_header("Access-Control-Allow-Origin", "*")
+                      self.end_headers()
+                      self.wfile.write(b)
+
+                  def do_GET(self):
+                      if self.path == "/state":
+                          with STATE_LOCK:
+                              self._j(200, {"gpus": GPUS, "tenants": TENANTS, "ts": time.time()})
+                          return
+                      if self.path == "/allocation_log":
+                          with STATE_LOCK:
+                              self._j(200, {"log": ALLOCATION_LOG[-100:], "ts": time.time()})
+                          return
+                      self._j(404, {"ok": False, "err": "not_found"})
+
+                  def do_POST(self):
+                      if self.path == "/register_gpu":
+                          body = self._read_json()
+                          gid = int(body.get("gpu_id", -1))
+                          total = int(body.get("total_sms", 0))
+                          if gid < 0 or total <= 0:
+                              self._j(400, {"ok": False, "err": "bad_args"})
+                              return
+                          with STATE_LOCK:
+                              if gid not in GPUS:
+                                  GPUS[gid] = {"total_sms": total, "used_sms": 0, "sched_api": None}
+                              else:
+                                  GPUS[gid]["total_sms"] = total
+                          print(f"[allocator] GPU {gid} registered: {total} SMs")
+                          self._j(200, {"ok": True, "gpu_id": gid, "total_sms": total})
+                          return
+
+                      if self.path == "/register_scheduler":
+                          body = self._read_json()
+                          gid = int(body.get("gpu_id", -1))
+                          api = str(body.get("api", "")).strip().rstrip("/")
+                          with STATE_LOCK:
+                              if gid not in GPUS:
+                                  GPUS[gid] = {"total_sms": 84, "used_sms": 0, "sched_api": api}
+                              else:
+                                  GPUS[gid]["sched_api"] = api
+                          print(f"[allocator] Scheduler registered for GPU {gid}: {api}")
+                          self._j(200, {"ok": True, "gpu_id": gid, "api": api})
+                          return
+
+                      if self.path == "/allocate":
+                          body = self._read_json()
+                          tid = str(body.get("tenant", "")).strip()
+                          if not tid:
+                              self._j(400, {"ok": False, "err": "missing_tenant"})
+                              return
+
+                          sm_pct, sm_count = None, None
+                          if "sm_count" in body and body["sm_count"]:
+                              sm_count = int(body["sm_count"])
+                          else:
+                              v = body.get("sm", "10%")
+                              if isinstance(v, (int, float)):
+                                  sm_pct = float(v)
+                              else:
+                                  s = str(v).strip()
+                                  if s.endswith("%"):
+                                      sm_pct = float(s[:-1])
+                                  else:
+                                      sm_pct = float(s)
+
+                          with STATE_LOCK:
+                              gpu_id = int(body.get("gpu_id", 0))
+                              if gpu_id not in GPUS:
+                                  GPUS[gpu_id] = {"total_sms": 84, "used_sms": 0, "sched_api": None}
+
+                              need = sm_count if sm_count else _pct_to_count(gpu_id, sm_pct)
+                              free = GPUS[gpu_id]["total_sms"] - GPUS[gpu_id]["used_sms"]
+
+                              if free < need:
+                                  self._j(409, {"ok": False, "err": "insufficient_sms", "need": need, "free": free})
+                                  return
+
+                              ok, note = _apply_to_scheduler(gpu_id, tid, sm_pct=sm_pct, sm_count=sm_count)
+
+                              GPUS[gpu_id]["used_sms"] += need
+                              TENANTS[tid] = {"gpu_id": gpu_id, "sm_pct": sm_pct, "sm_count": need}
+
+                              log_entry = {
+                                  "ts": time.time(),
+                                  "event": "allocate",
+                                  "tenant": tid,
+                                  "gpu_id": gpu_id,
+                                  "sm_count": need,
+                                  "sm_pct": sm_pct or (need * 100 / GPUS[gpu_id]["total_sms"]),
+                                  "total_used": GPUS[gpu_id]["used_sms"],
+                                  "total_free": GPUS[gpu_id]["total_sms"] - GPUS[gpu_id]["used_sms"]
+                              }
+                              ALLOCATION_LOG.append(log_entry)
+                              print(f"[allocator] ALLOCATE {tid}: {need} SMs ({sm_pct}%), used={GPUS[gpu_id]['used_sms']}/{GPUS[gpu_id]['total_sms']}")
+
+                          self._j(200, {"ok": True, "tenant": tid, "gpu_id": gpu_id, "sm_count": need, "note": note})
+                          return
+
+                      if self.path == "/release":
+                          body = self._read_json()
+                          tid = str(body.get("tenant", "")).strip()
+                          with STATE_LOCK:
+                              info = TENANTS.pop(tid, None)
+                              if not info:
+                                  self._j(404, {"ok": False, "err": "not_allocated"})
+                                  return
+                              gid = info["gpu_id"]
+                              cnt = info["sm_count"]
+                              GPUS[gid]["used_sms"] = max(0, GPUS[gid]["used_sms"] - cnt)
+
+                              log_entry = {
+                                  "ts": time.time(),
+                                  "event": "release",
+                                  "tenant": tid,
+                                  "gpu_id": gid,
+                                  "sm_count": cnt,
+                                  "total_used": GPUS[gid]["used_sms"],
+                                  "total_free": GPUS[gid]["total_sms"] - GPUS[gid]["used_sms"]
+                              }
+                              ALLOCATION_LOG.append(log_entry)
+                              print(f"[allocator] RELEASE {tid}: {cnt} SMs, used={GPUS[gid]['used_sms']}/{GPUS[gid]['total_sms']}")
+
+                          self._j(200, {"ok": True, "tenant": tid})
+                          return
+
+                      self._j(404, {"ok": False, "err": "not_found"})
+
+              if __name__ == "__main__":
+                  port = int(os.environ.get("ALLOCATOR_PORT", "7070"))
+                  # Auto-register GPU 0 with 84 SMs
+                  GPUS[0] = {"total_sms": 84, "used_sms": 0, "sched_api": None}
+                  print(f"[allocator] Starting on port {port}, GPU 0 pre-registered with 84 SMs")
+                  srv = ThreadingHTTPServer(("0.0.0.0", port), AllocatorAPI)
+                  srv.serve_forever()
+              PYEOF
+              python3 /app/allocator.py
+          ports:
+            - containerPort: 7070
+              hostPort: 7070
+          resources:
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keti-allocator
+  namespace: edge-system
+spec:
+  type: ClusterIP
+  ports:
+    - port: 7070
+      targetPort: 7070
+  selector:
+    app: keti-allocator
