@@ -1,0 +1,109 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: workload-a
+  namespace: default
+  labels:
+    app: sm-test-workload
+    workload: a
+  annotations:
+    nvidia.com/gpumem: "4000"
+    nvidia.com/gpucores: "80"
+    keti.io/partition: "A"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: cuda-workload
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: WORKLOAD_NAME
+          value: "workload-a"
+      command:
+        - /bin/bash
+        - -c
+        - |
+          exec 2>&1
+          echo "[workload-a] SM Partitioning Test"
+
+          # Create monitoring script that reports ACTUAL SM usage
+          cat > /tmp/monitor.sh << 'MONEOF'
+          #!/bin/bash
+          WORKLOAD_NAME=${WORKLOAD_NAME:-workload-a}
+          LIMIT_PCT=${KETI_SM_LIMIT:-30}
+          TOTAL_SMS=188
+          LIMIT_SMS=$((TOTAL_SMS * LIMIT_PCT / 100))
+
+          while true; do
+              # Get actual SM usage from nvidia-smi pmon
+              PMON=$(nvidia-smi pmon -c 1 2>/dev/null | grep -v "^#" | head -1)
+              if [ -n "$PMON" ]; then
+                  ACTUAL_SM_PCT=$(echo "$PMON" | awk '{print $4}')
+                  MEM_PCT=$(echo "$PMON" | awk '{print $5}')
+                  # Handle "-" values from nvidia-smi
+                  [[ "$ACTUAL_SM_PCT" == "-" ]] && ACTUAL_SM_PCT=0
+                  [[ "$MEM_PCT" == "-" ]] && MEM_PCT=0
+                  ACTUAL_SM=$((TOTAL_SMS * ACTUAL_SM_PCT / 100))
+
+                  echo "[$WORKLOAD_NAME] ACTUAL_SM=${ACTUAL_SM}/${TOTAL_SMS} (${ACTUAL_SM_PCT}%) | LIMIT=${LIMIT_SMS} (${LIMIT_PCT}%) | MEM_BW=${MEM_PCT}%"
+              fi
+              sleep 3
+          done
+          MONEOF
+          chmod +x /tmp/monitor.sh
+
+          # Create CUDA workload
+          cat > /tmp/workload.cu << 'CUDAEOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <cublas_v2.h>
+          #include <unistd.h>
+
+          int main() {
+              const int N = 4096;
+              size_t size = N * N * sizeof(float);
+              float *d_A, *d_B, *d_C;
+
+              cudaMalloc(&d_A, size);
+              cudaMalloc(&d_B, size);
+              cudaMalloc(&d_C, size);
+
+              float *h = (float*)malloc(size);
+              for(int i = 0; i < N*N; i++) h[i] = (float)(i % 100) / 100.0f;
+              cudaMemcpy(d_A, h, size, cudaMemcpyHostToDevice);
+              cudaMemcpy(d_B, h, size, cudaMemcpyHostToDevice);
+              free(h);
+
+              cublasHandle_t handle;
+              cublasCreate(&handle);
+              float alpha = 1.0f, beta = 0.0f;
+
+              // Run forever
+              while(1) {
+                  for(int i = 0; i < 100; i++) {
+                      cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+                  }
+                  cudaDeviceSynchronize();
+              }
+              return 0;
+          }
+          CUDAEOF
+
+          echo "[workload-a] Compiling..."
+          nvcc --cudart=shared -o /tmp/workload /tmp/workload.cu -lcublas 2>&1
+
+          echo "[workload-a] Starting GPU workload + monitor..."
+          echo ""
+
+          # Run workload in background, monitor in foreground
+          /tmp/workload &
+          WORKLOAD_PID=$!
+
+          sleep 2  # Wait for workload to start
+          /tmp/monitor.sh
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      # volumeMounts 제거 - KETI 플러그인이 자동 마운트
+  # volumes 제거 - KETI 플러그인이 자동 처리
+  restartPolicy: Never
