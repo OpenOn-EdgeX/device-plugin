@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keti-gpu-webhook
+  namespace: edge-system
+  labels:
+    app: keti-gpu-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keti-gpu-webhook
+  template:
+    metadata:
+      labels:
+        app: keti-gpu-webhook
+    spec:
+      serviceAccountName: keti-gpu-webhook
+      # Webhook must run on control-plane node (API Server cannot reach edge nodes)
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: webhook
+          image: ketidevit2/keti-gpu-webhook:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8443
+              name: https
+          env:
+            - name: VAI_ACCELERATOR_PATH
+              value: "/var/lib/keti/libvai_accelerator.so"
+            - name: ANNOTATION_GPUCORES
+              value: "nvidia.com/gpucores"
+            - name: ANNOTATION_GPUMEM
+              value: "nvidia.com/gpumem"
+            - name: GPU_RESOURCE_NAME
+              value: "nvidia.com/gpu"
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: keti-gpu-webhook-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keti-gpu-webhook
+  namespace: edge-system
+  labels:
+    app: keti-gpu-webhook
+spec:
+  ports:
+    - port: 443
+      targetPort: 8443
+      name: https
+  selector:
+    app: keti-gpu-webhook
