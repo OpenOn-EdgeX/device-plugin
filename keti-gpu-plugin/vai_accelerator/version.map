@@ -1,0 +1,37 @@
+/* Version script for vai_accelerator.so */
+
+VAI_1.0 {
+    global:
+        /* CUDA Driver API interceptors */
+        cuInit;
+        cuDriverGetVersion;
+        cuGetProcAddress;
+        cuGetProcAddress_v2;
+        cuLaunchKernel;
+        cuLaunchKernel_ptsz;
+        cuLaunchKernelEx;
+        cuLaunchKernelEx_ptsz;
+
+        /* CUDA Runtime API - for direct interception via LD_PRELOAD */
+        /* These are only called AFTER CUDA is initialized, so safe to hook */
+        cudaLaunchKernel;
+        cudaLaunchKernel_ptsz;
+
+        /* VAI query functions */
+        vai_get_sm_limit_pct;
+        vai_get_kernel_count;
+        vai_get_memory_used;
+        vai_get_memory_limit;
+        vai_get_current_tokens;
+
+        /* CUDA Injection */
+        InitializeInjection;
+        injectionInit;
+
+        /* dlsym interception - for LD_PRELOAD mode */
+        dlsym;
+
+    local:
+        /* Hide everything else to prevent symbol conflicts */
+        *;
+};
