@@ -1,0 +1,328 @@
+---
+# SM 파티션 검증 Pod - 파티션 A (7 chunks = 56 SM)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: verify-part-a
+  namespace: default
+  labels:
+    app: partition-verify
+    partition: a
+  annotations:
+    nvidia.com/gpumem: "1000"
+    nvidia.com/gpucores: "30"
+    keti.io/partition: "A"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: verify
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: PARTITION_NAME
+          value: "A"
+        - name: EXPECTED_SM
+          value: "56"
+      command:
+        - /bin/bash
+        - -c
+        - |
+          echo "======================================"
+          echo " Partition Verification: $PARTITION_NAME"
+          echo "======================================"
+          echo ""
+          echo "[ENV] CUDA_MPS_SM_PARTITION=$CUDA_MPS_SM_PARTITION"
+          echo ""
+
+          # CUDA 프로그램: SM 수 조회 + 간단한 벤치마크
+          cat > /tmp/verify.cu << 'EOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <cublas_v2.h>
+          #include <time.h>
+
+          int main() {
+              // 1. SM 수 조회
+              int smCount = 0;
+              cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, 0);
+
+              int maxThreadsPerSM = 0;
+              cudaDeviceGetAttribute(&maxThreadsPerSM, cudaDevAttrMaxThreadsPerMultiProcessor, 0);
+
+              cudaDeviceProp prop;
+              cudaGetDeviceProperties(&prop, 0);
+
+              printf("[GPU] Device: %s\n", prop.name);
+              printf("[GPU] SM Count (visible): %d\n", smCount);
+              printf("[GPU] Max Threads/SM: %d\n", maxThreadsPerSM);
+              printf("[GPU] Total Threads Capacity: %d\n", smCount * maxThreadsPerSM);
+              printf("\n");
+
+              char* expected = getenv("EXPECTED_SM");
+              if (expected) {
+                  int exp = atoi(expected);
+                  if (smCount == exp) {
+                      printf("[PASS] SM count matches expected: %d == %d\n", smCount, exp);
+                  } else {
+                      printf("[FAIL] SM count mismatch: got %d, expected %d\n", smCount, exp);
+                  }
+              }
+              printf("\n");
+
+              // 2. 간단한 벤치마크 (SGEMM)
+              const int N = 2048;
+              size_t sz = N * N * sizeof(float);
+              float *dA, *dB, *dC;
+              cudaMalloc(&dA, sz);
+              cudaMalloc(&dB, sz);
+              cudaMalloc(&dC, sz);
+
+              float *h = (float*)malloc(sz);
+              for (int i = 0; i < N*N; i++) h[i] = 1.0f;
+              cudaMemcpy(dA, h, sz, cudaMemcpyHostToDevice);
+              cudaMemcpy(dB, h, sz, cudaMemcpyHostToDevice);
+              free(h);
+
+              cublasHandle_t handle;
+              cublasCreate(&handle);
+              float alpha = 1.0f, beta = 0.0f;
+
+              // warmup
+              for (int i = 0; i < 5; i++)
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, dA, N, dB, N, &beta, dC, N);
+              cudaDeviceSynchronize();
+
+              // benchmark
+              int iters = 50;
+              struct timespec t0, t1;
+              clock_gettime(CLOCK_MONOTONIC, &t0);
+              for (int i = 0; i < iters; i++)
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, dA, N, dB, N, &beta, dC, N);
+              cudaDeviceSynchronize();
+              clock_gettime(CLOCK_MONOTONIC, &t1);
+
+              double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+              double gflops = (2.0 * N * N * N * iters) / elapsed / 1e9;
+
+              printf("[BENCH] %d x SGEMM(%d): %.3f sec, %.1f GFLOPS\n", iters, N, elapsed, gflops);
+              printf("[BENCH] Per-iteration: %.3f ms\n", elapsed / iters * 1000);
+
+              cudaFree(dA); cudaFree(dB); cudaFree(dC);
+              cublasDestroy(handle);
+
+              printf("\n[DONE] Partition verification complete.\n");
+              return 0;
+          }
+          EOF
+
+          echo "[BUILD] Compiling verification program..."
+          nvcc --cudart=shared -o /tmp/verify /tmp/verify.cu -lcublas 2>&1
+
+          echo ""
+          /tmp/verify
+
+          # 끝나지 않도록 대기 (로그 확인용)
+          echo ""
+          echo "Sleeping... (kubectl logs verify-part-a)"
+          sleep 3600
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+  restartPolicy: Never
+---
+# SM 파티션 검증 Pod - 파티션 B (7 chunks = 56 SM)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: verify-part-b
+  namespace: default
+  labels:
+    app: partition-verify
+    partition: b
+  annotations:
+    nvidia.com/gpumem: "1000"
+    nvidia.com/gpucores: "30"
+    keti.io/partition: "B"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: verify
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: PARTITION_NAME
+          value: "B"
+        - name: EXPECTED_SM
+          value: "56"
+      command:
+        - /bin/bash
+        - -c
+        - |
+          echo "======================================"
+          echo " Partition Verification: $PARTITION_NAME"
+          echo "======================================"
+          echo ""
+          echo "[ENV] CUDA_MPS_SM_PARTITION=$CUDA_MPS_SM_PARTITION"
+          echo ""
+
+          cat > /tmp/verify.cu << 'EOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <cublas_v2.h>
+          #include <time.h>
+          int main() {
+              int smCount = 0;
+              cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, 0);
+              int maxThreadsPerSM = 0;
+              cudaDeviceGetAttribute(&maxThreadsPerSM, cudaDevAttrMaxThreadsPerMultiProcessor, 0);
+              cudaDeviceProp prop;
+              cudaGetDeviceProperties(&prop, 0);
+              printf("[GPU] Device: %s\n", prop.name);
+              printf("[GPU] SM Count (visible): %d\n", smCount);
+              printf("[GPU] Max Threads/SM: %d\n", maxThreadsPerSM);
+              printf("\n");
+              char* expected = getenv("EXPECTED_SM");
+              if (expected) {
+                  int exp = atoi(expected);
+                  if (smCount == exp) printf("[PASS] SM count matches: %d == %d\n", smCount, exp);
+                  else printf("[FAIL] SM count mismatch: got %d, expected %d\n", smCount, exp);
+              }
+              printf("\n");
+              const int N = 2048;
+              size_t sz = N * N * sizeof(float);
+              float *dA, *dB, *dC;
+              cudaMalloc(&dA, sz); cudaMalloc(&dB, sz); cudaMalloc(&dC, sz);
+              float *h = (float*)malloc(sz);
+              for (int i = 0; i < N*N; i++) h[i] = 1.0f;
+              cudaMemcpy(dA, h, sz, cudaMemcpyHostToDevice);
+              cudaMemcpy(dB, h, sz, cudaMemcpyHostToDevice);
+              free(h);
+              cublasHandle_t handle; cublasCreate(&handle);
+              float alpha = 1.0f, beta = 0.0f;
+              for (int i = 0; i < 5; i++)
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, dA, N, dB, N, &beta, dC, N);
+              cudaDeviceSynchronize();
+              int iters = 50;
+              struct timespec t0, t1;
+              clock_gettime(CLOCK_MONOTONIC, &t0);
+              for (int i = 0; i < iters; i++)
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, dA, N, dB, N, &beta, dC, N);
+              cudaDeviceSynchronize();
+              clock_gettime(CLOCK_MONOTONIC, &t1);
+              double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+              double gflops = (2.0 * N * N * N * iters) / elapsed / 1e9;
+              printf("[BENCH] %d x SGEMM(%d): %.3f sec, %.1f GFLOPS\n", iters, N, elapsed, gflops);
+              cudaFree(dA); cudaFree(dB); cudaFree(dC); cublasDestroy(handle);
+              printf("\n[DONE] Partition verification complete.\n");
+              return 0;
+          }
+          EOF
+
+          echo "[BUILD] Compiling..."
+          nvcc --cudart=shared -o /tmp/verify /tmp/verify.cu -lcublas 2>&1
+          echo ""
+          /tmp/verify
+          echo ""
+          echo "Sleeping..."
+          sleep 3600
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+  restartPolicy: Never
+---
+# SM 파티션 검증 Pod - 파티션 C (8 chunks = 64 SM)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: verify-part-c
+  namespace: default
+  labels:
+    app: partition-verify
+    partition: c
+  annotations:
+    nvidia.com/gpumem: "1000"
+    nvidia.com/gpucores: "30"
+    keti.io/partition: "C"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: verify
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: PARTITION_NAME
+          value: "C"
+        - name: EXPECTED_SM
+          value: "64"
+      command:
+        - /bin/bash
+        - -c
+        - |
+          echo "======================================"
+          echo " Partition Verification: $PARTITION_NAME"
+          echo "======================================"
+          echo ""
+          echo "[ENV] CUDA_MPS_SM_PARTITION=$CUDA_MPS_SM_PARTITION"
+          echo ""
+
+          cat > /tmp/verify.cu << 'EOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <cublas_v2.h>
+          #include <time.h>
+          int main() {
+              int smCount = 0;
+              cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, 0);
+              int maxThreadsPerSM = 0;
+              cudaDeviceGetAttribute(&maxThreadsPerSM, cudaDevAttrMaxThreadsPerMultiProcessor, 0);
+              cudaDeviceProp prop;
+              cudaGetDeviceProperties(&prop, 0);
+              printf("[GPU] Device: %s\n", prop.name);
+              printf("[GPU] SM Count (visible): %d\n", smCount);
+              printf("[GPU] Max Threads/SM: %d\n", maxThreadsPerSM);
+              printf("\n");
+              char* expected = getenv("EXPECTED_SM");
+              if (expected) {
+                  int exp = atoi(expected);
+                  if (smCount == exp) printf("[PASS] SM count matches: %d == %d\n", smCount, exp);
+                  else printf("[FAIL] SM count mismatch: got %d, expected %d\n", smCount, exp);
+              }
+              printf("\n");
+              const int N = 2048;
+              size_t sz = N * N * sizeof(float);
+              float *dA, *dB, *dC;
+              cudaMalloc(&dA, sz); cudaMalloc(&dB, sz); cudaMalloc(&dC, sz);
+              float *h = (float*)malloc(sz);
+              for (int i = 0; i < N*N; i++) h[i] = 1.0f;
+              cudaMemcpy(dA, h, sz, cudaMemcpyHostToDevice);
+              cudaMemcpy(dB, h, sz, cudaMemcpyHostToDevice);
+              free(h);
+              cublasHandle_t handle; cublasCreate(&handle);
+              float alpha = 1.0f, beta = 0.0f;
+              for (int i = 0; i < 5; i++)
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, dA, N, dB, N, &beta, dC, N);
+              cudaDeviceSynchronize();
+              int iters = 50;
+              struct timespec t0, t1;
+              clock_gettime(CLOCK_MONOTONIC, &t0);
+              for (int i = 0; i < iters; i++)
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, dA, N, dB, N, &beta, dC, N);
+              cudaDeviceSynchronize();
+              clock_gettime(CLOCK_MONOTONIC, &t1);
+              double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+              double gflops = (2.0 * N * N * N * iters) / elapsed / 1e9;
+              printf("[BENCH] %d x SGEMM(%d): %.3f sec, %.1f GFLOPS\n", iters, N, elapsed, gflops);
+              cudaFree(dA); cudaFree(dB); cudaFree(dC); cublasDestroy(handle);
+              printf("\n[DONE] Partition verification complete.\n");
+              return 0;
+          }
+          EOF
+
+          echo "[BUILD] Compiling..."
+          nvcc --cudart=shared -o /tmp/verify /tmp/verify.cu -lcublas 2>&1
+          echo ""
+          /tmp/verify
+          echo ""
+          echo "Sleeping..."
+          sleep 3600
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+  restartPolicy: Never
