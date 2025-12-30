@@ -1,0 +1,92 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: workload-b-3
+  namespace: default
+  labels:
+    app: sm-test-workload
+    workload: b-3
+    partition: b
+  annotations:
+    nvidia.com/gpumem: "2000"
+    nvidia.com/gpucores: "40"
+    keti.io/partition: "B"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: cuda-workload
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: WORKLOAD_NAME
+          value: "workload-b-3"
+        - name: MATRIX_SIZE
+          value: "1024"
+      command:
+        - /bin/bash
+        - -c
+        - |
+          exec 2>&1
+          echo "[workload-b-3] SM Partitioning Test - Partition B"
+
+          cat > /tmp/monitor.sh << 'MONEOF'
+          #!/bin/bash
+          WORKLOAD_NAME=${WORKLOAD_NAME:-workload-b-3}
+          TOTAL_SMS=188
+          while true; do
+              PMON=$(nvidia-smi pmon -c 1 2>/dev/null | grep -v "^#" | head -1)
+              if [ -n "$PMON" ]; then
+                  SM_PCT=$(echo "$PMON" | awk '{print $4}')
+                  MEM_PCT=$(echo "$PMON" | awk '{print $5}')
+                  [[ "$SM_PCT" == "-" ]] && SM_PCT=0
+                  [[ "$MEM_PCT" == "-" ]] && MEM_PCT=0
+                  echo "[$WORKLOAD_NAME] SM=${SM_PCT}% | MEM_BW=${MEM_PCT}%"
+              fi
+              sleep 3
+          done
+          MONEOF
+          chmod +x /tmp/monitor.sh
+
+          N=${MATRIX_SIZE:-1024}
+          cat > /tmp/workload.cu << CUDAEOF
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <cublas_v2.h>
+          #include <unistd.h>
+          int main() {
+              const int N = ${N};
+              size_t size = N * N * sizeof(float);
+              float *d_A, *d_B, *d_C;
+              cudaMalloc(&d_A, size);
+              cudaMalloc(&d_B, size);
+              cudaMalloc(&d_C, size);
+              float *h = (float*)malloc(size);
+              for(int i = 0; i < N*N; i++) h[i] = (float)(i % 100) / 100.0f;
+              cudaMemcpy(d_A, h, size, cudaMemcpyHostToDevice);
+              cudaMemcpy(d_B, h, size, cudaMemcpyHostToDevice);
+              free(h);
+              cublasHandle_t handle;
+              cublasCreate(&handle);
+              float alpha = 1.0f, beta = 0.0f;
+              printf("[workload-b-3] Running SGEMM N=%d\\n", N);
+              while(1) {
+                  for(int i = 0; i < 100; i++) {
+                      cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+                  }
+                  cudaDeviceSynchronize();
+              }
+              return 0;
+          }
+          CUDAEOF
+
+          echo "[workload-b-3] Compiling (N=${N})..."
+          nvcc --cudart=shared -o /tmp/workload /tmp/workload.cu -lcublas 2>&1
+
+          echo "[workload-b-3] Starting GPU workload + monitor..."
+          /tmp/workload &
+          sleep 2
+          /tmp/monitor.sh
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+  restartPolicy: Never
