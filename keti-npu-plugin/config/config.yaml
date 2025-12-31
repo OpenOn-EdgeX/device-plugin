@@ -1,0 +1,9 @@
+# KETI NPU Plugin Configuration
+# Local development configuration
+
+npu:
+  device_count: 1
+  default_memory_mb: 16384
+
+logging:
+  level: INFO

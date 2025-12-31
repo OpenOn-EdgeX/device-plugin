@@ -1,0 +1,9 @@
+# KETI NPU Plugin Dependencies (KubeEdge 전용)
+
+# HTTP client (for EdgeCore MetaServer API)
+requests>=2.31.0
+
+# gRPC (for Device Plugin)
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
