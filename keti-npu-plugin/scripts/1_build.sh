@@ -1,0 +1,45 @@
+#!/bin/bash
+#
+# 1. Build Script - Build Docker image for KETI NPU Plugin
+#
+
+set -e
+
+# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+REGISTRY="${REGISTRY:-ketidevit2}"
+IMAGE_NAME="${IMAGE_NAME:-keti-npu-plugin}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}  KETI NPU Plugin - Build              ${NC}"
+echo -e "${GREEN}========================================${NC}"
+
+cd "$PROJECT_DIR"
+
+echo -e "${YELLOW}Building image: ${FULL_IMAGE}${NC}"
+
+# Build Docker image
+docker build -t "$FULL_IMAGE" .
+
+echo ""
+echo -e "${YELLOW}Pushing image to Docker Hub...${NC}"
+docker push "$FULL_IMAGE"
+
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}  Build & Push Complete!               ${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo ""
+echo "Image: $FULL_IMAGE"
+echo ""
+echo "Next step:"
+echo "  - Deploy: ./scripts/2_deploy.sh"
