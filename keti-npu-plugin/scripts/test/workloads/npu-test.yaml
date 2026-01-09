@@ -1,0 +1,38 @@
+---
+# NPU Test Workload (Placeholder)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: npu-test
+  namespace: default
+  labels:
+    app: npu-test-workload
+spec:
+  containers:
+    - name: npu-workload
+      image: ubuntu:22.04
+      command:
+        - /bin/bash
+        - -c
+        - |
+          echo "=========================================="
+          echo "[NPU] Test Workload Started"
+          echo "=========================================="
+          echo "NPU Device: ${NPU_DEVICE_ID:-npu-0}"
+          echo "Memory Limit: ${NPU_MEMORY_LIMIT:-16GB}"
+          echo ""
+          echo "[NPU] Status: Running (placeholder)"
+          echo "[NPU] No actual NPU operations - skeleton only"
+          echo ""
+          sleep infinity
+      env:
+        - name: NPU_DEVICE_ID
+          value: "npu-0"
+        - name: NPU_MEMORY_LIMIT
+          value: "16GB"
+      resources:
+        limits:
+          # keti.com/npu: 1  # Uncomment when device plugin is ready
+          memory: "1Gi"
+          cpu: "500m"
+  restartPolicy: Never
