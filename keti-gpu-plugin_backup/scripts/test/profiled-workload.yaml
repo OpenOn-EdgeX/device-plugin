@@ -1,0 +1,344 @@
+---
+# SM Partitioning Profiled Workload with Visualization
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-profile-visualizer
+  namespace: default
+  labels:
+    app: gpu-profile-visualizer
+  annotations:
+    nvidia.com/gpumem: "8000"
+    nvidia.com/gpucores: "50"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: profiler
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: LD_PRELOAD
+          value: "/etc/vai/libvai_accelerator.so"
+        - name: BLESS_LIMIT_PCT
+          value: "50"
+      ports:
+        - containerPort: 8888
+          name: http
+      command:
+        - /bin/bash
+        - -c
+        - |
+          exec 2>&1
+          echo "=== GPU Profile Visualizer ==="
+
+          # Install Python + matplotlib
+          apt-get update -qq 2>/dev/null
+          apt-get install -y -qq python3 python3-pip 2>/dev/null
+          pip3 install matplotlib numpy --quiet 2>/dev/null
+
+          # Create CUDA workload
+          cat > /tmp/workload.cu << 'CUDAEOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <cublas_v2.h>
+          #include <sys/time.h>
+
+          double get_time() {
+              struct timeval tv;
+              gettimeofday(&tv, NULL);
+              return tv.tv_sec + tv.tv_usec * 1e-6;
+          }
+
+          int main(int argc, char** argv) {
+              int sm_pct = argc > 1 ? atoi(argv[1]) : 50;
+              const int N = 2048;
+              const int ITERS = 100;
+              size_t size = N * N * sizeof(float);
+              float *d_A, *d_B, *d_C;
+
+              cudaMalloc(&d_A, size);
+              cudaMalloc(&d_B, size);
+              cudaMalloc(&d_C, size);
+
+              float *h = (float*)malloc(size);
+              for(int i = 0; i < N*N; i++) h[i] = (float)(i % 100) / 100.0f;
+              cudaMemcpy(d_A, h, size, cudaMemcpyHostToDevice);
+              cudaMemcpy(d_B, h, size, cudaMemcpyHostToDevice);
+              free(h);
+
+              cublasHandle_t handle;
+              cublasCreate(&handle);
+              float alpha = 1.0f, beta = 0.0f;
+
+              // Warmup
+              for(int i = 0; i < 10; i++)
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+              cudaDeviceSynchronize();
+
+              double start = get_time();
+              for(int i = 0; i < ITERS; i++)
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+              cudaDeviceSynchronize();
+              double elapsed = get_time() - start;
+
+              double gflops = (2.0 * N * N * N * ITERS) / elapsed / 1e9;
+              double avg_ms = elapsed * 1000 / ITERS;
+              printf("%d,%.2f,%.4f\n", sm_pct, gflops, avg_ms);
+
+              cublasDestroy(handle);
+              cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
+              return 0;
+          }
+          CUDAEOF
+
+          nvcc --cudart=shared -o /tmp/workload /tmp/workload.cu -lcublas 2>&1
+
+          # Create visualization script
+          cat > /tmp/visualize.py << 'PYEOF'
+          import matplotlib
+          matplotlib.use('Agg')
+          import matplotlib.pyplot as plt
+          import numpy as np
+          import subprocess
+          import os
+          import http.server
+          import socketserver
+          import base64
+          import io
+          import json
+          from datetime import datetime
+
+          TOTAL_SMS = 188  # RTX PRO 6000
+
+          def run_profile(sm_pct):
+              """Run workload with specific SM percentage"""
+              env = os.environ.copy()
+              env['BLESS_LIMIT_PCT'] = str(sm_pct)
+              env['LD_PRELOAD'] = '/etc/vai/libvai_accelerator.so'
+
+              result = subprocess.run(['/tmp/workload', str(sm_pct)],
+                                     capture_output=True, text=True, env=env)
+
+              # Parse stderr for vai_accelerator init info
+              stderr = result.stderr
+              sm_affinity = int(TOTAL_SMS * sm_pct / 100)  # fallback
+              for line in stderr.split('\n'):
+                  if 'limited ctx sm_affinity=' in line:
+                      try:
+                          sm_affinity = int(line.split('sm_affinity=')[1].split()[0])
+                      except:
+                          pass
+
+              # Parse stdout for metrics
+              stdout = result.stdout.strip()
+              if stdout:
+                  parts = stdout.split(',')
+                  if len(parts) >= 3:
+                      return {
+                          'sm_pct': int(parts[0]),
+                          'sm_affinity': sm_affinity,
+                          'gflops': float(parts[1]),
+                          'avg_ms': float(parts[2])
+                      }
+              return None
+
+          def create_dashboard():
+              """Generate visualization dashboard"""
+              sm_configs = [10, 20, 30, 50, 70, 100]
+              results = []
+
+              print("Running profiling tests...")
+              for pct in sm_configs:
+                  print(f"  Testing {pct}% SM allocation...", flush=True)
+                  r = run_profile(pct)
+                  if r:
+                      results.append(r)
+                      print(f"    SM: {r['sm_affinity']}/{TOTAL_SMS}, GFLOPS: {r['gflops']:.1f}", flush=True)
+
+              if not results:
+                  print("No results collected!")
+                  return None
+
+              # Create visualization
+              fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+              fig.suptitle(f'KETI SM Partitioning Profile Results\n{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+                          fontsize=16, fontweight='bold')
+
+              sm_pcts = [r['sm_pct'] for r in results]
+              sm_affinities = [r['sm_affinity'] for r in results]
+              gflops = [r['gflops'] for r in results]
+              avg_ms = [r['avg_ms'] for r in results]
+
+              colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(results)))
+
+              # Plot 1: SM Allocation
+              ax1 = axes[0, 0]
+              bars1 = ax1.bar(range(len(results)), sm_affinities, color=colors, edgecolor='black', linewidth=1.5)
+              ax1.set_xticks(range(len(results)))
+              ax1.set_xticklabels([f'{p}%' for p in sm_pcts], fontsize=11)
+              ax1.set_ylabel('Allocated SMs', fontsize=12)
+              ax1.set_xlabel('Requested SM %', fontsize=12)
+              ax1.set_title(f'SM Allocation (Total: {TOTAL_SMS} SMs)', fontsize=13, fontweight='bold')
+              ax1.axhline(y=TOTAL_SMS, color='red', linestyle='--', linewidth=2, label=f'Max ({TOTAL_SMS})')
+              for bar, val in zip(bars1, sm_affinities):
+                  ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 3,
+                          str(val), ha='center', va='bottom', fontweight='bold', fontsize=11)
+              ax1.legend(loc='upper left')
+              ax1.set_ylim(0, TOTAL_SMS * 1.15)
+              ax1.grid(axis='y', alpha=0.3)
+
+              # Plot 2: GFLOPS Performance
+              ax2 = axes[0, 1]
+              bars2 = ax2.bar(range(len(results)), gflops, color=colors, edgecolor='black', linewidth=1.5)
+              ax2.set_xticks(range(len(results)))
+              ax2.set_xticklabels([f'{p}%\n({s} SMs)' for p, s in zip(sm_pcts, sm_affinities)], fontsize=10)
+              ax2.set_ylabel('GFLOPS', fontsize=12)
+              ax2.set_xlabel('SM Allocation', fontsize=12)
+              ax2.set_title('Compute Performance (SGEMM 2048x2048)', fontsize=13, fontweight='bold')
+              for bar, val in zip(bars2, gflops):
+                  ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 200,
+                          f'{val:.0f}', ha='center', va='bottom', fontweight='bold', fontsize=10)
+              ax2.grid(axis='y', alpha=0.3)
+
+              # Plot 3: Kernel Time
+              ax3 = axes[1, 0]
+              bars3 = ax3.bar(range(len(results)), avg_ms, color=colors, edgecolor='black', linewidth=1.5)
+              ax3.set_xticks(range(len(results)))
+              ax3.set_xticklabels([f'{p}%' for p in sm_pcts], fontsize=11)
+              ax3.set_ylabel('Avg Kernel Time (ms)', fontsize=12)
+              ax3.set_xlabel('SM Allocation %', fontsize=12)
+              ax3.set_title('Kernel Execution Time', fontsize=13, fontweight='bold')
+              for bar, val in zip(bars3, avg_ms):
+                  ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005,
+                          f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=10)
+              ax3.grid(axis='y', alpha=0.3)
+
+              # Plot 4: SM vs Performance scatter
+              ax4 = axes[1, 1]
+              scatter = ax4.scatter(sm_affinities, gflops, c=sm_pcts, cmap='viridis',
+                                   s=200, edgecolors='black', linewidth=2)
+              ax4.plot(sm_affinities, gflops, 'k--', alpha=0.5, linewidth=1)
+              ax4.set_xlabel('Allocated SMs', fontsize=12)
+              ax4.set_ylabel('GFLOPS', fontsize=12)
+              ax4.set_title('SM Count vs Performance', fontsize=13, fontweight='bold')
+              cbar = plt.colorbar(scatter, ax=ax4)
+              cbar.set_label('SM %', fontsize=11)
+              for x, y, p in zip(sm_affinities, gflops, sm_pcts):
+                  ax4.annotate(f'{p}%', (x, y), textcoords="offset points",
+                              xytext=(0, 10), ha='center', fontweight='bold')
+              ax4.grid(alpha=0.3)
+
+              plt.tight_layout()
+
+              # Save to file
+              plt.savefig('/tmp/profile_result.png', dpi=150, bbox_inches='tight', facecolor='white')
+              print("Saved visualization to /tmp/profile_result.png")
+
+              # Return base64 for web display
+              buf = io.BytesIO()
+              fig.savefig(buf, format='png', dpi=120, facecolor='white', bbox_inches='tight')
+              buf.seek(0)
+              b64 = base64.b64encode(buf.read()).decode()
+              plt.close(fig)
+
+              return b64, results
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              chart_b64 = None
+              results = None
+
+              def do_GET(self):
+                  if self.path == '/refresh' or Handler.chart_b64 is None:
+                      Handler.chart_b64, Handler.results = create_dashboard()
+
+                  results_html = ""
+                  if Handler.results:
+                      results_html = "<table style='margin:20px auto;border-collapse:collapse;'>"
+                      results_html += "<tr style='background:#3498db;'><th style='padding:10px;'>SM %</th><th style='padding:10px;'>SMs</th><th style='padding:10px;'>GFLOPS</th><th style='padding:10px;'>Kernel (ms)</th></tr>"
+                      for r in Handler.results:
+                          results_html += f"<tr><td style='padding:8px;text-align:center;'>{r['sm_pct']}%</td>"
+                          results_html += f"<td style='padding:8px;text-align:center;'>{r['sm_affinity']}</td>"
+                          results_html += f"<td style='padding:8px;text-align:center;'>{r['gflops']:.1f}</td>"
+                          results_html += f"<td style='padding:8px;text-align:center;'>{r['avg_ms']:.3f}</td></tr>"
+                      results_html += "</table>"
+
+                  html = f'''<!DOCTYPE html>
+          <html><head>
+          <meta charset="utf-8">
+          <title>GPU SM Partitioning Profile</title>
+          <style>
+          body {{ margin:0; padding:20px; background:linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); font-family:Arial; color:white; text-align:center; min-height:100vh; }}
+          img {{ max-width:95%; border-radius:15px; box-shadow:0 10px 40px rgba(0,0,0,0.5); }}
+          h1 {{ color:#00d4ff; text-shadow: 0 0 10px #00d4ff; }}
+          .btn {{ background:linear-gradient(45deg, #00d4ff, #0099cc); color:white; padding:12px 30px; border:none; border-radius:25px; cursor:pointer; margin:10px; font-size:16px; font-weight:bold; transition:transform 0.2s; }}
+          .btn:hover {{ transform:scale(1.05); background:linear-gradient(45deg, #0099cc, #006699); }}
+          .info {{ background:rgba(255,255,255,0.1); padding:20px; border-radius:15px; margin:20px auto; max-width:800px; text-align:left; backdrop-filter:blur(10px); }}
+          table {{ border:1px solid #444; background:rgba(0,0,0,0.3); }}
+          td, th {{ border:1px solid #444; }}
+          </style>
+          </head>
+          <body>
+          <h1>KETI SM Partitioning Profile</h1>
+          <div class="info">
+            <p><b>vai_accelerator.so SM Partitioning Test Results</b></p>
+            <p>This dashboard tests different SM allocation percentages using cuCtxCreate_v3 with CU_EXEC_AFFINITY_TYPE_SM_COUNT.</p>
+            <p>RTX PRO 6000: <b>188 SMs</b> total</p>
+          </div>
+          <button class="btn" onclick="location.href='/refresh'">Re-run Profile Test</button>
+          {results_html}
+          <br>
+          {'<img src="data:image/png;base64,' + Handler.chart_b64 + '">' if Handler.chart_b64 else '<p>Loading...</p>'}
+          <p style="margin-top:20px;color:#888;">Last updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+          </body></html>'''
+
+                  self.send_response(200)
+                  self.send_header("Content-type", "text/html")
+                  self.end_headers()
+                  self.wfile.write(html.encode())
+
+              def log_message(self, *args): pass
+
+          if __name__ == "__main__":
+              print("\n=== Running initial profile ===")
+              Handler.chart_b64, Handler.results = create_dashboard()
+
+              print("\n=== Starting web server on port 8888 ===")
+              print("Access dashboard at: http://10.0.4.232:30888/")
+              with socketserver.TCPServer(("0.0.0.0", 8888), Handler) as httpd:
+                  httpd.serve_forever()
+          PYEOF
+
+          python3 /tmp/visualize.py
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - name: vai-lib
+          mountPath: /etc/vai
+          readOnly: true
+        - name: host-cuda
+          mountPath: /host-cuda
+          readOnly: true
+  volumes:
+    - name: vai-lib
+      configMap:
+        name: vai-accelerator-binary
+        defaultMode: 0755
+    - name: host-cuda
+      hostPath:
+        path: /usr/local/cuda
+        type: Directory
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-profile-visualizer
+  namespace: default
+spec:
+  type: NodePort
+  selector:
+    app: gpu-profile-visualizer
+  ports:
+    - port: 8888
+      targetPort: 8888
+      nodePort: 30888

@@ -1,0 +1,31 @@
+# Test GPU Pod for KETI Resource Scheduler
+# nvidia.com/gpu (limits) + annotation (gpumem, gpucores)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-gpu-pod-1
+  namespace: default
+  annotations:
+    # GPU 세부 설정 (annotation으로 전달)
+    nvidia.com/gpumem: "3000"    # GPU 메모리 (MB)
+    nvidia.com/gpucores: "30"    # GPU 코어 사용률 (%)
+  labels:
+    app: test-gpu
+    test: single-pod
+spec:
+  # Edge 노드에 배포
+  nodeSelector:
+    node-role.kubernetes.io/edge: ""
+  tolerations:
+    - key: "node-role.kubernetes.io/edge"
+      operator: "Exists"
+      effect: "NoSchedule"
+  containers:
+    - name: gpu-test
+      image: busybox:latest
+      command: ["sh", "-c", "echo 'GPU Env:' && env | grep KETI && sleep 3600"]
+      resources:
+        limits:
+          # Device Plugin으로 GPU 요청 (이것만 limits에)
+          nvidia.com/gpu: 1
+  restartPolicy: Never

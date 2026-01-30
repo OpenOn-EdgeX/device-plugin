@@ -1,0 +1,206 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: profile-30pct
+  namespace: default
+  annotations:
+    nvidia.com/gpumem: "4000"
+    nvidia.com/gpucores: "30"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: profiler
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: LD_PRELOAD
+          value: "/etc/vai/libvai_accelerator.so"
+        - name: BLESS_LIMIT_PCT
+          value: "30"
+      command:
+        - /bin/bash
+        - -c
+        - |
+          exec 2>&1  # Redirect stderr to stdout
+          echo "=== KETI SM Partitioning Test (30%) ==="
+          echo "LD_PRELOAD=$LD_PRELOAD"
+          echo "BLESS_LIMIT_PCT=$BLESS_LIMIT_PCT"
+
+          cat > /tmp/workload.cu << 'CUDAEOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <cublas_v2.h>
+          #include <unistd.h>
+          #include <time.h>
+
+          int main(int argc, char** argv) {
+              const char* name = argc > 1 ? argv[1] : "30pct";
+              int duration = argc > 2 ? atoi(argv[2]) : 5;
+              const int N = 4096;
+              size_t size = N * N * sizeof(float);
+              float *d_A, *d_B, *d_C;
+
+              printf("[%s] Starting %ds GPU compute (4096x4096 matmul)...\n", name, duration);
+              fflush(stdout);
+
+              cudaMalloc(&d_A, size);
+              cudaMalloc(&d_B, size);
+              cudaMalloc(&d_C, size);
+
+              float *h = (float*)malloc(size);
+              for(int i = 0; i < N*N; i++) h[i] = (float)(i % 100) / 100.0f;
+              cudaMemcpy(d_A, h, size, cudaMemcpyHostToDevice);
+              cudaMemcpy(d_B, h, size, cudaMemcpyHostToDevice);
+              free(h);
+
+              cublasHandle_t handle;
+              cublasCreate(&handle);
+              float alpha = 1.0f, beta = 0.0f;
+
+              // Warmup
+              for(int i = 0; i < 5; i++) {
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+              }
+              cudaDeviceSynchronize();
+
+              printf("[%s] Running profiled section...\n", name);
+              fflush(stdout);
+
+              time_t start = time(NULL);
+              int iterations = 0;
+              while(time(NULL) - start < duration) {
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+                  cudaDeviceSynchronize();
+                  iterations++;
+              }
+
+              printf("[%s] Done! %d iterations in %lds (%.2f iter/s)\n",
+                     name, iterations, time(NULL) - start, (float)iterations/duration);
+              cublasDestroy(handle);
+              cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
+              return 0;
+          }
+          CUDAEOF
+
+          # CRITICAL: Use --cudart=shared for LD_PRELOAD to work
+          nvcc --cudart=shared -o /tmp/workload /tmp/workload.cu -lcublas 2>&1
+          echo "[30pct] Compiled. Waiting 15s for both pods to start..."
+          sleep 15
+          echo "[30pct] Starting workload..."
+          /tmp/workload 30pct 20
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - name: vai-lib
+          mountPath: /etc/vai
+          readOnly: true
+  volumes:
+    - name: vai-lib
+      configMap:
+        name: vai-accelerator-binary
+        defaultMode: 0755
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: profile-70pct
+  namespace: default
+  annotations:
+    nvidia.com/gpumem: "8000"
+    nvidia.com/gpucores: "70"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: profiler
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: LD_PRELOAD
+          value: "/etc/vai/libvai_accelerator.so"
+        - name: BLESS_LIMIT_PCT
+          value: "70"
+      command:
+        - /bin/bash
+        - -c
+        - |
+          exec 2>&1  # Redirect stderr to stdout
+          echo "=== KETI SM Partitioning Test (70%) ==="
+          echo "LD_PRELOAD=$LD_PRELOAD"
+          echo "BLESS_LIMIT_PCT=$BLESS_LIMIT_PCT"
+
+          cat > /tmp/workload.cu << 'CUDAEOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <cublas_v2.h>
+          #include <unistd.h>
+          #include <time.h>
+
+          int main(int argc, char** argv) {
+              const char* name = argc > 1 ? argv[1] : "70pct";
+              int duration = argc > 2 ? atoi(argv[2]) : 5;
+              const int N = 4096;
+              size_t size = N * N * sizeof(float);
+              float *d_A, *d_B, *d_C;
+
+              printf("[%s] Starting %ds GPU compute (4096x4096 matmul)...\n", name, duration);
+              fflush(stdout);
+
+              cudaMalloc(&d_A, size);
+              cudaMalloc(&d_B, size);
+              cudaMalloc(&d_C, size);
+
+              float *h = (float*)malloc(size);
+              for(int i = 0; i < N*N; i++) h[i] = (float)(i % 100) / 100.0f;
+              cudaMemcpy(d_A, h, size, cudaMemcpyHostToDevice);
+              cudaMemcpy(d_B, h, size, cudaMemcpyHostToDevice);
+              free(h);
+
+              cublasHandle_t handle;
+              cublasCreate(&handle);
+              float alpha = 1.0f, beta = 0.0f;
+
+              // Warmup
+              for(int i = 0; i < 5; i++) {
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+              }
+              cudaDeviceSynchronize();
+
+              printf("[%s] Running profiled section...\n", name);
+              fflush(stdout);
+
+              time_t start = time(NULL);
+              int iterations = 0;
+              while(time(NULL) - start < duration) {
+                  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+                  cudaDeviceSynchronize();
+                  iterations++;
+              }
+
+              printf("[%s] Done! %d iterations in %lds (%.2f iter/s)\n",
+                     name, iterations, time(NULL) - start, (float)iterations/duration);
+              cublasDestroy(handle);
+              cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
+              return 0;
+          }
+          CUDAEOF
+
+          # CRITICAL: Use --cudart=shared for LD_PRELOAD to work
+          nvcc --cudart=shared -o /tmp/workload /tmp/workload.cu -lcublas 2>&1
+          echo "[70pct] Compiled. Waiting 15s for both pods to start..."
+          sleep 15
+          echo "[70pct] Starting workload..."
+          /tmp/workload 70pct 20
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - name: vai-lib
+          mountPath: /etc/vai
+          readOnly: true
+  volumes:
+    - name: vai-lib
+      configMap:
+        name: vai-accelerator-binary
+        defaultMode: 0755
+  restartPolicy: Never

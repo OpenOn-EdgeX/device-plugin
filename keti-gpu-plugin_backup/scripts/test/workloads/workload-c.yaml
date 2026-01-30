@@ -1,0 +1,137 @@
+---
+# Workload C - 70% SM Limit - Pure CUDA Kernel (no cuBLAS)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: workload-c
+  namespace: default
+  labels:
+    app: sm-test-workload
+    workload: c
+  annotations:
+    nvidia.com/gpumem: "4000"
+    nvidia.com/gpucores: "70"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: cuda-workload
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: WORKLOAD_NAME
+          value: "workload-c"
+        - name: LD_PRELOAD
+          value: "/var/lib/keti/libvai_accelerator.so"
+        - name: CUDA_INJECTION64_PATH
+          value: "/var/lib/keti/libvai_accelerator.so"
+        - name: VAI_LIMIT_PCT
+          value: "70"
+      command:
+        - /bin/bash
+        - -c
+        - |
+          exec 2>&1
+          echo "=========================================="
+          echo "[workload-c] Pure CUDA Kernel Test (70%)"
+          echo "=========================================="
+
+          cat > /tmp/monitor.sh << 'MONEOF'
+          #!/bin/bash
+          WORKLOAD_NAME=${WORKLOAD_NAME:-workload-c}
+          LIMIT_PCT=${VAI_LIMIT_PCT:-70}
+          TOTAL_SMS=188
+          LIMIT_SMS=$((TOTAL_SMS * LIMIT_PCT / 100))
+
+          while true; do
+              PMON=$(nvidia-smi pmon -c 1 2>/dev/null | grep -v "^#" | head -1)
+              if [ -n "$PMON" ]; then
+                  ACTUAL_SM_PCT=$(echo "$PMON" | awk '{print $4}')
+                  MEM_PCT=$(echo "$PMON" | awk '{print $5}')
+                  # Handle empty or dash values
+                  if [ -z "$ACTUAL_SM_PCT" ] || [ "$ACTUAL_SM_PCT" = "-" ]; then
+                      ACTUAL_SM_PCT=0
+                  fi
+                  if [ -z "$MEM_PCT" ] || [ "$MEM_PCT" = "-" ]; then
+                      MEM_PCT=0
+                  fi
+                  ACTUAL_SM=$((TOTAL_SMS * ACTUAL_SM_PCT / 100))
+                  echo "[$WORKLOAD_NAME] ACTUAL_SM=${ACTUAL_SM}/${TOTAL_SMS} (${ACTUAL_SM_PCT}%) | LIMIT=${LIMIT_SMS} (${LIMIT_PCT}%) | MEM_BW=${MEM_PCT}%"
+              fi
+              sleep 3
+          done
+          MONEOF
+          chmod +x /tmp/monitor.sh
+
+          # Pure CUDA kernel - no cuBLAS
+          cat > /tmp/workload.cu << 'CUDAEOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+
+          // Simple compute-intensive kernel
+          __global__ void heavyKernel(float *data, int n, int iterations) {
+              int idx = blockIdx.x * blockDim.x + threadIdx.x;
+              if (idx < n) {
+                  float val = data[idx];
+                  // Heavy computation loop
+                  for (int i = 0; i < iterations; i++) {
+                      val = sinf(val) * cosf(val) + sqrtf(fabsf(val) + 1.0f);
+                      val = __expf(val * 0.001f) * __logf(fabsf(val) + 1.0f);
+                  }
+                  data[idx] = val;
+              }
+          }
+
+          int main() {
+              const int N = 1024 * 1024 * 16;  // 16M elements
+              const int iterations = 100;
+              size_t size = N * sizeof(float);
+
+              float *d_data;
+              cudaMalloc(&d_data, size);
+
+              // Initialize
+              float *h_data = (float*)malloc(size);
+              for (int i = 0; i < N; i++) h_data[i] = (float)(i % 1000) / 1000.0f;
+              cudaMemcpy(d_data, h_data, size, cudaMemcpyHostToDevice);
+              free(h_data);
+
+              int blockSize = 256;
+              int numBlocks = (N + blockSize - 1) / blockSize;
+
+              printf("[workload-c] Running pure CUDA kernel: %d blocks x %d threads\n", numBlocks, blockSize);
+
+              // Run forever
+              while (1) {
+                  for (int i = 0; i < 50; i++) {
+                      heavyKernel<<<numBlocks, blockSize>>>(d_data, N, iterations);
+                  }
+                  cudaDeviceSynchronize();
+              }
+
+              cudaFree(d_data);
+              return 0;
+          }
+          CUDAEOF
+
+          echo "[workload-c] Compiling pure CUDA kernel..."
+          # Use --cudart=shared to allow LD_PRELOAD interception
+          nvcc --cudart=shared -o /tmp/workload /tmp/workload.cu 2>&1
+
+          echo "[workload-c] Starting GPU workload + monitor..."
+          echo ""
+
+          /tmp/workload &
+          sleep 2
+          /tmp/monitor.sh
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - name: vai-accelerator
+          mountPath: /var/lib/keti
+          readOnly: false  # Need write access for shared state
+  volumes:
+    - name: vai-accelerator
+      hostPath:
+        path: /var/lib/keti
+        type: Directory
+  restartPolicy: Never

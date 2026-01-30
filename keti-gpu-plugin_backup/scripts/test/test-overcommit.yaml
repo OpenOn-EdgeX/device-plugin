@@ -1,0 +1,50 @@
+# Test GPU Overcommit for KETI Resource Scheduler
+# 오버커밋 테스트 (100% 이상 요청)
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: heavy-gpu-1
+  namespace: default
+  annotations:
+    keti.io/gpu-memory: "4Gi"
+    keti.io/gpu-cores: "60"
+  labels:
+    app: heavy-gpu
+    test: overcommit
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/edge: ""
+  tolerations:
+    - key: "node-role.kubernetes.io/edge"
+      operator: "Exists"
+      effect: "NoSchedule"
+  containers:
+    - name: heavy
+      image: busybox:latest
+      command: ["sleep", "3600"]
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: heavy-gpu-2
+  namespace: default
+  annotations:
+    keti.io/gpu-memory: "4Gi"
+    keti.io/gpu-cores: "60"
+  labels:
+    app: heavy-gpu
+    test: overcommit
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/edge: ""
+  tolerations:
+    - key: "node-role.kubernetes.io/edge"
+      operator: "Exists"
+      effect: "NoSchedule"
+  containers:
+    - name: heavy
+      image: busybox:latest
+      command: ["sleep", "3600"]
+  restartPolicy: Never

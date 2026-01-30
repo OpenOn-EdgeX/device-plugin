@@ -1,0 +1,116 @@
+---
+# Workload B - 20% SM Limit - Direct mount (no webhook)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: workload-b
+  namespace: default
+  labels:
+    app: keti-gpu-plugin  # Bypass webhook via objectSelector exclusion
+    workload: b
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: cuda-workload
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      env:
+        - name: WORKLOAD_NAME
+          value: "workload-b"
+        - name: LD_PRELOAD
+          value: "/var/lib/keti/libvai_accelerator.so"
+        - name: CUDA_INJECTION64_PATH
+          value: "/var/lib/keti/libvai_accelerator.so"
+        - name: VAI_LIMIT_PCT
+          value: "20"
+      command:
+        - /bin/bash
+        - -c
+        - |
+          exec 2>&1
+          echo "=========================================="
+          echo "[workload-b] SM Partitioning Test (20%)"
+          echo "=========================================="
+
+          cat > /tmp/monitor.sh << 'MONEOF'
+          #!/bin/bash
+          WORKLOAD_NAME=${WORKLOAD_NAME:-workload-b}
+          LIMIT_PCT=${VAI_LIMIT_PCT:-20}
+          TOTAL_SMS=188
+          LIMIT_SMS=$((TOTAL_SMS * LIMIT_PCT / 100))
+
+          while true; do
+              PMON=$(nvidia-smi pmon -c 1 2>/dev/null | grep -v "^#" | head -1)
+              if [ -n "$PMON" ]; then
+                  ACTUAL_SM_PCT=$(echo "$PMON" | awk '{print $4}')
+                  MEM_PCT=$(echo "$PMON" | awk '{print $5}')
+                  if [ -z "$ACTUAL_SM_PCT" ] || [ "$ACTUAL_SM_PCT" = "-" ]; then
+                      ACTUAL_SM_PCT=0
+                  fi
+                  if [ -z "$MEM_PCT" ] || [ "$MEM_PCT" = "-" ]; then
+                      MEM_PCT=0
+                  fi
+                  ACTUAL_SM=$((TOTAL_SMS * ACTUAL_SM_PCT / 100))
+                  echo "[$WORKLOAD_NAME] ACTUAL_SM=${ACTUAL_SM}/${TOTAL_SMS} (${ACTUAL_SM_PCT}%) | LIMIT=${LIMIT_SMS} (${LIMIT_PCT}%) | MEM_BW=${MEM_PCT}%"
+              fi
+              sleep 3
+          done
+          MONEOF
+          chmod +x /tmp/monitor.sh
+
+          cat > /tmp/workload.cu << 'CUDAEOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <cublas_v2.h>
+
+          int main() {
+              const int N = 4096;
+              size_t size = N * N * sizeof(float);
+              float *d_A, *d_B, *d_C;
+
+              cudaMalloc(&d_A, size);
+              cudaMalloc(&d_B, size);
+              cudaMalloc(&d_C, size);
+
+              float *h = (float*)malloc(size);
+              for(int i = 0; i < N*N; i++) h[i] = (float)(i % 100) / 100.0f;
+              cudaMemcpy(d_A, h, size, cudaMemcpyHostToDevice);
+              cudaMemcpy(d_B, h, size, cudaMemcpyHostToDevice);
+              free(h);
+
+              cublasHandle_t handle;
+              cublasCreate(&handle);
+              float alpha = 1.0f, beta = 0.0f;
+
+              printf("[workload-b] Running cuBLAS SGEMM\n");
+              while(1) {
+                  for(int i = 0; i < 100; i++) {
+                      cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_A, N, d_B, N, &beta, d_C, N);
+                  }
+                  cudaDeviceSynchronize();
+              }
+              return 0;
+          }
+          CUDAEOF
+
+          echo "[workload-b] Compiling..."
+          nvcc --cudart=shared -o /tmp/workload /tmp/workload.cu -lcublas 2>&1
+
+          echo "[workload-b] Starting GPU workload + monitor..."
+          echo ""
+
+          /tmp/workload &
+          sleep 2
+          /tmp/monitor.sh
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - name: vai-accelerator
+          mountPath: /var/lib/keti
+          readOnly: false
+  volumes:
+    - name: vai-accelerator
+      hostPath:
+        path: /var/lib/keti
+        type: Directory
+  restartPolicy: Never

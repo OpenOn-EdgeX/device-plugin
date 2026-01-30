@@ -1,0 +1,74 @@
+# Test Multiple GPU Pods for KETI Resource Scheduler
+# 여러 Pod 동시 할당 테스트
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ai-inference-1
+  namespace: default
+  annotations:
+    keti.io/gpu-memory: "2Gi"
+    keti.io/gpu-cores: "30"
+  labels:
+    app: ai-inference
+    test: multi-pod
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/edge: ""
+  tolerations:
+    - key: "node-role.kubernetes.io/edge"
+      operator: "Exists"
+      effect: "NoSchedule"
+  containers:
+    - name: inference
+      image: busybox:latest
+      command: ["sleep", "3600"]
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ai-inference-2
+  namespace: default
+  annotations:
+    keti.io/gpu-memory: "3Gi"
+    keti.io/gpu-cores: "40"
+  labels:
+    app: ai-inference
+    test: multi-pod
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/edge: ""
+  tolerations:
+    - key: "node-role.kubernetes.io/edge"
+      operator: "Exists"
+      effect: "NoSchedule"
+  containers:
+    - name: inference
+      image: busybox:latest
+      command: ["sleep", "3600"]
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ai-inference-3
+  namespace: default
+  annotations:
+    keti.io/gpu-memory: "1Gi"
+    keti.io/gpu-cores: "20"
+  labels:
+    app: ai-inference
+    test: multi-pod
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/edge: ""
+  tolerations:
+    - key: "node-role.kubernetes.io/edge"
+      operator: "Exists"
+      effect: "NoSchedule"
+  containers:
+    - name: inference
+      image: busybox:latest
+      command: ["sleep", "3600"]
+  restartPolicy: Never

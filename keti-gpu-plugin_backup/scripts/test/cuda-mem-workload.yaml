@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-workload
+  namespace: default
+  annotations:
+    nvidia.com/gpumem: "8000"
+    nvidia.com/gpucores: "40"
+spec:
+  nodeName: edge-gpu-232
+  containers:
+    - name: workload
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      command:
+        - /bin/bash
+        - -c
+        - |
+          echo "[Workload] Creating CUDA memory allocation program..."
+
+          cat > /tmp/memtest.cu << 'CUDAEOF'
+          #include <stdio.h>
+          #include <cuda_runtime.h>
+          #include <unistd.h>
+
+          int main() {
+              size_t alloc_size = 8ULL * 1024 * 1024 * 1024; // 8GB
+              void *d_ptr1, *d_ptr2;
+              size_t free_mem, total_mem;
+
+              printf("[Workload] Starting CUDA memory test (120s)...\n");
+
+              cudaMemGetInfo(&free_mem, &total_mem);
+              printf("[Workload] Initial: Free=%zu MB, Total=%zu MB\n",
+                     free_mem/1024/1024, total_mem/1024/1024);
+
+              // Allocate GPU memory
+              printf("[Workload] Allocating 8GB GPU memory...\n");
+              if (cudaMalloc(&d_ptr1, alloc_size) != cudaSuccess) {
+                  printf("[Workload] Failed to allocate 8GB, trying 4GB...\n");
+                  alloc_size = 4ULL * 1024 * 1024 * 1024;
+                  if (cudaMalloc(&d_ptr1, alloc_size) != cudaSuccess) {
+                      printf("[Workload] Failed to allocate memory\n");
+                      return 1;
+                  }
+              }
+
+              cudaMemGetInfo(&free_mem, &total_mem);
+              printf("[Workload] After alloc: Free=%zu MB, Total=%zu MB\n",
+                     free_mem/1024/1024, total_mem/1024/1024);
+
+              // Keep memory allocated for 120 seconds
+              int elapsed = 0;
+              while (elapsed < 120) {
+                  cudaMemGetInfo(&free_mem, &total_mem);
+                  printf("[Workload] %ds - Used: %zu MB\n",
+                         elapsed, (total_mem - free_mem)/1024/1024);
+                  sleep(10);
+                  elapsed += 10;
+              }
+
+              cudaFree(d_ptr1);
+              printf("[Workload] Done!\n");
+              return 0;
+          }
+          CUDAEOF
+
+          echo "[Workload] Compiling..."
+          nvcc -o /tmp/memtest /tmp/memtest.cu 2>&1
+
+          echo "[Workload] Running..."
+          /tmp/memtest
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+  restartPolicy: Never
