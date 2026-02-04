@@ -17,6 +17,11 @@ device-plugin/
 │   ├── scripts/test/workloads/    # Test workload YAMLs
 │   └── deploy/                    # Kubernetes deployments
 │
+├── keti-ppo-agent/                # PPO-based resource scheduler
+│   ├── pkg/agent/                 # PPO Agent (Actor-Critic)
+│   ├── pkg/api/                   # REST API server
+│   └── deploy/                    # Kubernetes deployments
+│
 └── README.md
 ```
 
@@ -48,6 +53,21 @@ device-plugin/
 
 **Environment Variables:**
 - `NPU_DEVICE_COUNT`: Number of NPU devices (default: 1)
+
+### keti-ppo-agent
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| PPO Agent | ✅ Ready | Actor-Critic based GPU resource allocation |
+| REST API | ✅ Ready | /allocate, /partition, /health endpoints |
+| MPS Integration | ✅ Ready | NVIDIA MPS partition lookup |
+
+**Pod Name:** `keti-ppo-agent-xxxxx`
+
+**Environment Variables:**
+- `API_PORT`: Agent API port (default: 8080)
+- `CUDA_MPS_PIPE_DIRECTORY`: MPS pipe path
+- `GPU_UUID`: Target GPU UUID
 
 ## Quick Start
 
