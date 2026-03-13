@@ -121,3 +121,9 @@ keti-npu-plugin-xxxxx    Running
 └─────────────────────────────────────────────────────────────────┘
 ```
 # device-plugin
+
+## Contributors
+
+| Name | Role |
+|------|------|
+| corehun | Project Lead |
