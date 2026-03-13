@@ -127,3 +127,4 @@ keti-npu-plugin-xxxxx    Running
 | Name | Role |
 |------|------|
 | corehun | Project Lead |
+| DrakwonJ | Developer |
