@@ -129,3 +129,4 @@ keti-npu-plugin-xxxxx    Running
 | corehun | Project Lead |
 | DrakwonJ | Developer |
 | joingi99 | Developer |
+| KilJuHyun | Developer |
