@@ -130,3 +130,4 @@ keti-npu-plugin-xxxxx    Running
 | DrakwonJ | Developer |
 | joingi99 | Developer |
 | KilJuHyun | Developer |
+| Kim-HanGyeol | Developer |
