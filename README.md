@@ -131,3 +131,4 @@ keti-npu-plugin-xxxxx    Running
 | joingi99 | Developer |
 | KilJuHyun | Developer |
 | Kim-HanGyeol | Developer |
+| Nick-Stokes | Developer |
